@@ -1,6 +1,9 @@
 /* eslint-disable no-console */
 import 'dotenv/config';
 import { execSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { PrismaPg } from '@prisma/adapter-pg';
 import chalk from 'chalk';
 import { PrismaClient } from '../generated/prisma/client.js';
@@ -15,10 +18,24 @@ if (process.env.SKIP_DB_CHECK) {
 
 const url = new URL(process.env.DATABASE_URL);
 
-const adapter = new PrismaPg(
-  { connectionString: url.toString() },
-  { schema: url.searchParams.get('schema') },
-);
+// m9: verified TLS when DATABASE_CA_CERT (PEM) is set – same rules as getPoolConfig in src/lib/prisma.ts
+const caCert = process.env.DATABASE_CA_CERT?.replace(/\\n/g, '\n');
+const SSL_PARAMS = ['ssl', 'sslmode', 'sslcert', 'sslkey', 'sslrootcert'];
+
+function getPoolConfig() {
+  if (!caCert) {
+    return { connectionString: url.toString() };
+  }
+
+  const poolUrl = new URL(url);
+  for (const key of SSL_PARAMS) {
+    poolUrl.searchParams.delete(key);
+  }
+
+  return { connectionString: poolUrl.toString(), ssl: { ca: caCert, rejectUnauthorized: true } };
+}
+
+const adapter = new PrismaPg(getPoolConfig(), { schema: url.searchParams.get('schema') });
 
 const prisma = new PrismaClient({ adapter });
 
@@ -71,7 +88,22 @@ async function checkDatabaseVersion() {
 
 async function applyMigration() {
   if (!process.env.SKIP_DB_MIGRATION) {
-    const directUrl = process.env.DIRECT_DATABASE_URL || process.env.DATABASE_URL;
+    let directUrl = process.env.DIRECT_DATABASE_URL || process.env.DATABASE_URL;
+
+    // m9: the Prisma schema engine takes the CA as a file and verifies it with sslaccept=strict
+    if (caCert) {
+      const certPath = path.join(os.tmpdir(), 'umami-db-ca.crt');
+      fs.writeFileSync(certPath, caCert);
+
+      const migrateUrl = new URL(directUrl);
+      for (const key of SSL_PARAMS) {
+        migrateUrl.searchParams.delete(key);
+      }
+      migrateUrl.searchParams.set('sslmode', 'require');
+      migrateUrl.searchParams.set('sslcert', certPath);
+      migrateUrl.searchParams.set('sslaccept', 'strict');
+      directUrl = migrateUrl.toString();
+    }
     console.log(
       execSync('prisma migrate deploy', {
         env: { ...process.env, DATABASE_URL: directUrl },

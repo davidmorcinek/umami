@@ -8,6 +8,27 @@ import type { Operator, PropertyFilter, QueryFilters, QueryOptions } from './typ
 
 const log = debug('umami:prisma');
 
+// m9: verified TLS when DATABASE_CA_CERT (PEM, e.g. the Supabase root CA) is set.
+// The ssl* params are dropped from the URL because pg would otherwise replace this config.
+// Without the variable the URL is used as is (keep sslmode=verify-full there to fail closed).
+function getPoolConfig(connectionString: string) {
+  const ca = process.env.DATABASE_CA_CERT;
+
+  if (!ca) {
+    return { connectionString };
+  }
+
+  const url = new URL(connectionString);
+  for (const key of ['ssl', 'sslmode', 'sslcert', 'sslkey', 'sslrootcert']) {
+    url.searchParams.delete(key);
+  }
+
+  return {
+    connectionString: url.toString(),
+    ssl: { ca: ca.replace(/\\n/g, '\n'), rejectUnauthorized: true },
+  };
+}
+
 const EQUALITY_OPERATORS: Operator[] = [OPERATORS.equals, OPERATORS.notEquals];
 const SEARCH_OPERATORS: Operator[] = [OPERATORS.contains, OPERATORS.doesNotContain];
 const REGEX_OPERATORS: Operator[] = [OPERATORS.regex, OPERATORS.notRegex];
@@ -867,7 +888,7 @@ function getClient() {
 
   const schema = getSchema();
 
-  const baseAdapter = new PrismaPg({ connectionString: url }, { schema });
+  const baseAdapter = new PrismaPg(getPoolConfig(url), { schema });
 
   const baseClient = new PrismaClient({
     adapter: baseAdapter,
@@ -885,7 +906,7 @@ function getClient() {
     return baseClient;
   }
 
-  const replicaAdapter = new PrismaPg({ connectionString: replicaUrl }, { schema });
+  const replicaAdapter = new PrismaPg(getPoolConfig(replicaUrl), { schema });
 
   const replicaClient = new PrismaClient({
     adapter: replicaAdapter,
